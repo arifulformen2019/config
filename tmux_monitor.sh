@@ -50,7 +50,3 @@ echo "Setup complete"
 
 # Kiểm tra crontab
 crontab -l | grep tmux_monitor && echo "✓ Cron job verified" || echo "✗ Cron job failed"
-Beta
-0 / 10
-used queries
-1
