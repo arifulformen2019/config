@@ -61,7 +61,7 @@ echo "Removing temporary directory $TEMP_DIR..."
 rm -rf "$TEMP_DIR"
 
 # Step 3: Change ports for each instance
-for ((i=0; i<NUM_INSTANCES; i++)); do
+for ((i=0; i<=NUM_INSTANCES; i++)); do
     INSTANCE="rl-swarm-$i"
     INCREMENT=$(( (i-1) * INCREMENT_STEP ))
 
