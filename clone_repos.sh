@@ -14,7 +14,7 @@ REPO_URL="https://github.com/xailong-6969/rl-swarm.git"
 TEMP_DIR="rl-swarm-temp"
 
 # Number of directories to create (can be changed, e.g.: 5 or 10)
-NUM_INSTANCES=16
+NUM_INSTANCES=20
 
 # Port increment step for each instance
 INCREMENT_STEP=10
