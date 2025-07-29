@@ -8,7 +8,8 @@ OTEL_HTTP_PORT=4318
 OTEL_PROM_PORT=55679
 
 # Repository URL
-REPO_URL="https://github.com/xailong-6969/rl-swarm.git"
+#REPO_URL="https://github.com/xailong-6969/rl-swarm.git"
+REPO_URL="https://github.com/arifulformen2019/rl-swarm1.git"
 
 # Temporary directory to clone the original repository
 TEMP_DIR="rl-swarm-temp"
