@@ -23,6 +23,21 @@ from huggingface_hub import login, whoami
 
 from rgym_exp.src.utils.name_utils import get_name_from_peer_id
 
+# ✅ ADD: Colorful logging imports
+try:
+    from colorama import Fore, Style, init
+    init(autoreset=True)  # Auto reset colors
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    COLORAMA_AVAILABLE = False
+    # Fallback to no colors
+    class MockFore:
+        CYAN = GREEN = RED = YELLOW = MAGENTA = BLUE = ""
+    class MockStyle:
+        RESET_ALL = ""
+    Fore = MockFore()
+    Style = MockStyle()
+
 try:
     import psutil  # ✅ ADD: Memory monitoring
     PSUTIL_AVAILABLE = True
@@ -144,11 +159,13 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
 
         self.batched_signals = 0.0
         self.time_since_submit = time.time() #seconds
-        self.submit_period = 1.0 #hours
+        self.submit_period = 1.0 #hours  # ✅ CÓ THỂ THAY ĐỔI: 1.0, 2.0, etc.
         self.submitted_this_round = False
 
         # ✅ ADD: Log memory optimization loaded
-        get_logger().info("MANAGER PATCH: Memory-optimized manager initialized")
+        get_logger().info(
+            f"{Fore.GREEN}🚀 MANAGER PATCH: Memory-optimized manager initialized with colorful logging!{Style.RESET_ALL}"
+        )
 
     # ✅ ADD: Memory monitoring methods
     def _start_memory_monitor(self):
@@ -175,7 +192,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             memory_gb = process.memory_info().rss / 1024 / 1024 / 1024
             
             if memory_gb > self.memory_threshold_gb:
-                get_logger().warning(f"MANAGER PATCH: High memory usage: {memory_gb:.1f}GB")
+                get_logger().warning(
+                    f"{Fore.YELLOW}⚠️ MANAGER PATCH: High memory usage: {memory_gb:.1f}GB{Style.RESET_ALL}"
+                )
                 self._aggressive_cleanup()
                 
         except Exception as e:
@@ -188,7 +207,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             for i in range(5):
                 collected = gc.collect()
                 if i == 0:
-                    get_logger().info(f"MANAGER PATCH: GC collected {collected} objects")
+                    get_logger().info(
+                        f"{Fore.CYAN}🧹 MANAGER PATCH: GC collected {collected} objects{Style.RESET_ALL}"
+                    )
             
             # Clear accumulated rewards data if too large
             try:
@@ -197,7 +218,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                     recent_rewards = dict(list(self.rewards.items())[-50:])
                     self.rewards.clear()
                     self.rewards.update(recent_rewards)
-                    get_logger().info("MANAGER PATCH: Cleaned old rewards data")
+                    get_logger().info(
+                        f"{Fore.CYAN}🧹 MANAGER PATCH: Cleaned old rewards data{Style.RESET_ALL}"
+                    )
             except Exception:
                 pass
                 
@@ -240,19 +263,65 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         elapsed_time_hours = (time.time() - self.time_since_submit) / 3600
         if elapsed_time_hours > self.submit_period:
             try:
+                # 🎯 ENHANCED LOGGING - Before submit
+                get_logger().info(
+                    f"{Fore.CYAN}🚀 [SUBMIT STARTING] Round: {self.state.round} | "
+                    f"Points: {int(self.batched_signals)} | "
+                    f"Agent: {self.animal_name}{Style.RESET_ALL}"
+                )
+                
+                # Submit reward to blockchain
                 self.coordinator.submit_reward(
                     self.state.round, 0, int(self.batched_signals), self.peer_id
                 )
-                self.batched_signals = 0.0
+                
+                # Determine winner
                 if len(signal_by_agent) > 0:
                     max_agent, max_signal = max(signal_by_agent.items(), key=lambda x: x[1])
-                else: # if we have no signal_by_agents, just submit ourselves.
+                    try:
+                        winner_name = get_name_from_peer_id(max_agent, True) if max_agent != self.peer_id else self.animal_name
+                    except:
+                        winner_name = "unknown-agent"
+                else:
                     max_agent = self.peer_id
+                    winner_name = self.animal_name
+                    max_signal = int(self.batched_signals)
 
+                # Submit winners
                 self.coordinator.submit_winners(self.state.round, [max_agent], self.peer_id)
+                
+                # 🎯 ENHANCED LOGGING - Success
+                get_logger().info(
+                    f"{Fore.GREEN}✅ [SUBMIT SUCCESS] 🎉 POINTS SUBMITTED! 🎉\n"
+                    f"   💰 Points Sent: {int(self.batched_signals)}\n"
+                    f"   🏆 Round Winner: {winner_name} ({max_signal} pts)\n"
+                    f"   🕐 Next Submit: {self.submit_period} hours\n"
+                    f"   🐾 Agent: {self.animal_name}{Style.RESET_ALL}"
+                )
+                
+                # Reset counters
+                submitted_points = int(self.batched_signals)
+                self.batched_signals = 0.0
                 self.time_since_submit = time.time()
                 self.submitted_this_round = True
+                
+                # 🎯 Additional success log with stats
+                get_logger().info(
+                    f"{Fore.BLUE}📊 [STATS] Total Submitted: {submitted_points} | "
+                    f"Round: {self.state.round} | "
+                    f"Uptime: {elapsed_time_hours:.1f}h{Style.RESET_ALL}"
+                )
+                
             except Exception as e:
+                # 🎯 ENHANCED ERROR LOGGING
+                get_logger().error(
+                    f"{Fore.RED}❌ [SUBMIT FAILED] 💥 SUBMISSION ERROR! 💥\n"
+                    f"   🚨 Error: {str(e)}\n"
+                    f"   💰 Points Lost: {int(self.batched_signals)}\n"
+                    f"   🔄 Will Retry Next Cycle\n"
+                    f"   🐾 Agent: {self.animal_name}{Style.RESET_ALL}"
+                )
+                
                 get_logger().exception(
                     "Failed to submit to chain.\n"
                     "This is most likely transient and will recover.\n"
@@ -261,10 +330,37 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                     "filing a github issue here: https://github.com/gensyn-ai/rl-swarm/issues/ \n"
                     "including the full stacktrace."
                 )
+        else:
+            # 🎯 WAITING LOG - Only show occasionally to avoid spam
+            remaining_hours = self.submit_period - elapsed_time_hours
+            remaining_minutes = remaining_hours * 60
+            
+            # Only log every 30 minutes when waiting
+            if not hasattr(self, '_last_waiting_log'):
+                self._last_waiting_log = 0
+            
+            if time.time() - self._last_waiting_log > 1800:  # 30 minutes
+                get_logger().info(
+                    f"{Fore.YELLOW}⏳ [WAITING] Next submit in: {remaining_minutes:.0f} minutes | "
+                    f"Current points: {int(self.batched_signals)} | "
+                    f"Agent: {self.animal_name}{Style.RESET_ALL}"
+                )
+                self._last_waiting_log = time.time()
 
     def _hook_after_rewards_updated(self):
         signal_by_agent = self._get_total_rewards_by_agent()
+        old_signals = self.batched_signals
         self.batched_signals += self._get_my_rewards(signal_by_agent)
+        
+        # 🎯 LOG REWARD UPDATES
+        reward_gained = self.batched_signals - old_signals
+        if reward_gained > 0:
+            get_logger().info(
+                f"{Fore.GREEN}💰 [REWARD GAINED] +{reward_gained:.1f} points | "
+                f"Total: {int(self.batched_signals)} | "
+                f"Agent: {self.animal_name}{Style.RESET_ALL}"
+            )
+        
         self._try_submit_to_chain(signal_by_agent)
         
         # ✅ ADD: Light cleanup after rewards updated
@@ -284,6 +380,15 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         # ✅ ADD: Increment round counter and cleanup
         self.round_counter += 1
         
+        # 🎯 ENHANCED ROUND ADVANCEMENT LOG
+        get_logger().info(
+            f"{Fore.MAGENTA}🔄 [ROUND ADVANCED] 🚀 NEW ROUND STARTED! 🚀\n"
+            f"   📈 Round: {self.state.round}\n"  
+            f"   🎯 Total Rounds Completed: {self.round_counter}\n"
+            f"   💰 Pending Points: {int(self.batched_signals)}\n"
+            f"   🐾 Agent: {self.animal_name}{Style.RESET_ALL}"
+        )
+        
         self._save_to_hf()
 
         # Try to submit to chain again if necessary, but don't update our signal twice
@@ -301,7 +406,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             # Aggressive cleanup every 10 rounds
             if self.round_counter % 10 == 0:
                 self._aggressive_cleanup()
-                get_logger().info(f"MANAGER PATCH: Round {self.round_counter} cleanup completed")
+                get_logger().info(
+                    f"{Fore.CYAN}🧹 [CLEANUP] Memory cleanup completed for round {self.round_counter}{Style.RESET_ALL}"
+                )
                 
         except Exception as e:
             get_logger().error(f"Round cleanup failed: {e}")
@@ -314,7 +421,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         
         # ✅ ADD: Final cleanup after game
         try:
-            get_logger().info("MANAGER PATCH: Final cleanup after game")
+            get_logger().info(
+                f"{Fore.GREEN}🎮 [GAME ENDED] Final cleanup after game | Agent: {self.animal_name}{Style.RESET_ALL}"
+            )
             self._aggressive_cleanup()
         except Exception as e:
             get_logger().error(f"Final cleanup failed: {e}")
@@ -325,7 +434,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             self.hf_token not in [None, "None"]
             and self.state.round % self.hf_push_frequency == 0
         ):
-            get_logger().info(f"pushing model to huggingface")
+            get_logger().info(
+                f"{Fore.BLUE}📤 [HF PUSH] Pushing model to Hugging Face Hub | Round: {self.state.round}{Style.RESET_ALL}"
+            )
             try:
                 repo_id = self.trainer.args.hub_model_id
                 if repo_id is None:
@@ -344,10 +455,17 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                     ],
                 )
                 
+                get_logger().info(
+                    f"{Fore.GREEN}✅ [HF SUCCESS] Model pushed successfully to {repo_id}{Style.RESET_ALL}"
+                )
+                
                 # ✅ ADD: Cleanup after HF push
                 gc.collect()
                 
-            except Exception:
+            except Exception as e:
+                get_logger().error(
+                    f"{Fore.RED}❌ [HF FAILED] Failed to push model: {str(e)}{Style.RESET_ALL}"
+                )
                 get_logger().exception(
                     "Failed to push model to the Hugging Face Hub. When you conclude training please try manually pushing it yourself using the instructions here: https://huggingface.co/docs/hub/en/models-uploading",
                     stack_info=True,
@@ -365,6 +483,10 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         # ✅ ADD: Agent block counter for cleanup
         self.agent_block_counter += 1
         
+        get_logger().info(
+            f"{Fore.YELLOW}⏸️ [BLOCKING] Waiting for swarm round advancement... | Agent: {self.animal_name}{Style.RESET_ALL}"
+        )
+        
         while time.monotonic() - start_time < self.train_timeout:
             curr_time = time.monotonic()
             _ = self.communication.dht.get_visible_maddrs(latest=True)
@@ -375,7 +497,7 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
             except Exception as e:
                 if curr_time - fetch_log_time > log_timeout:
                     get_logger().debug(
-                        f"Could not fetch round and stage: {e}. Next check in {check_interval}s."
+                        f"{Fore.YELLOW}🔍 Could not fetch round and stage: {e}. Next check in {check_interval}s.{Style.RESET_ALL}"
                     )
                     fetch_log_time = curr_time
 
@@ -383,7 +505,9 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                 continue
 
             if round_num >= self.state.round:
-                get_logger().info(f"🐝 Joining round: {round_num}")
+                get_logger().info(
+                    f"{Fore.GREEN}🐝 [JOINING] Joining round: {round_num} | Agent: {self.animal_name}{Style.RESET_ALL}"
+                )
                 check_backoff = check_interval  # Reset backoff after successful round
                 self.state.round = round_num  # advance to swarm's round.
                 
@@ -391,19 +515,26 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
                 try:
                     if self.agent_block_counter % 50 == 0:
                         gc.collect()
-                        get_logger().debug(f"MANAGER PATCH: Agent block cleanup #{self.agent_block_counter}")
+                        get_logger().debug(
+                            f"{Fore.CYAN}🧹 Agent block cleanup #{self.agent_block_counter}{Style.RESET_ALL}"
+                        )
                 except Exception:
                     pass
                     
                 return
             else:
                 get_logger().info(
-                    f"Already finished round: {round_num}. Next check in {check_backoff}s."
+                    f"{Fore.YELLOW}⏭️ Already finished round: {round_num}. Next check in {check_backoff}s.{Style.RESET_ALL}"
                 )
                 time.sleep(check_backoff)
                 check_backoff = min(check_backoff * 2, max_check_interval)
 
             if round_num == self.max_round - 1:
+                get_logger().info(
+                    f"{Fore.MAGENTA}🏁 [FINAL ROUND] Reached maximum round: {self.max_round}{Style.RESET_ALL}"
+                )
                 return
 
-        get_logger().info("Training timed out!")
+        get_logger().info(
+            f"{Fore.RED}⏰ [TIMEOUT] Training timed out after {self.train_timeout}s!{Style.RESET_ALL}"
+        )
