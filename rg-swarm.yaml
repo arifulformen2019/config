@@ -24,7 +24,7 @@ blockchain:
   swarm_contract_address: ${oc.env:SWARM_CONTRACT,null}
   org_id: ${oc.env:ORG_ID,null}
   mainnet_chain_id: 685685
-  modal_proxy_url: "http://localhost:3010/api/"
+  modal_proxy_url: "http://localhost:3000/api/"
   swarm_coordinator_abi_path: "rgym_exp/contracts/SwarmCoordinator_0.4.2.json"
 
 eval:
@@ -100,22 +100,20 @@ game_manager:
     system_prompt_id: 'default'
     seed: ${training.seed}
     num_transplant_trees: ${training.num_transplant_trees}
+    max_retries: 10
+    timeout_per_sample: 300
+    batch_timeout: 600
+    enable_data_caching: true
+    cache_size: 1000
   communication:
     _target_: genrl.communication.hivemind.hivemind_backend.HivemindBackend
     initial_peers: ${communications.initial_peers}
     identity_path: ${oc.env:IDENTITY_PATH,null}
-    startup_timeout: 300
+    startup_timeout: 600
     beam_size: 10
-    disable_caching: true
-    cache_locally: false
-    cache_on_store: false
-    connection_cleanup_interval: 60
-    max_idle_connections: 5
-    heartbeat_interval: 30
-    request_timeout: 30
-    max_message_size: 1048576
-    enable_compression: true
-    cleanup_on_shutdown: true
+    disable_caching: false
+    cache_locally: true
+    cache_on_store: true
   coordinator:
     _target_: rgym_exp.src.coordinator.ModalSwarmCoordinator
     web3_url: ${blockchain.alchemy_url}
