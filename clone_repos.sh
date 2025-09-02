@@ -14,7 +14,7 @@ REPO_URL="https://github.com/arifulformen2019/rl-swarm.git"
 TEMP_DIR="rl-swarm-temp"
 
 # Number of directories to create (can be changed, e.g.: 5 or 10)
-NUM_INSTANCES=12
+NUM_INSTANCES=80
 
 # Port increment step for each instance
 INCREMENT_STEP=10
