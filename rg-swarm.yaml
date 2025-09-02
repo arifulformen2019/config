@@ -76,7 +76,6 @@ game_manager:
         quantization_config:
           _target_: transformers.BitsAndBytesConfig
           load_in_4bit: true
-          llm_int8_enable_fp32_cpu_offload: true
           bnb_4bit_compute_dtype: ${training.dtype}
           bnb_4bit_use_double_quant: false
           bnb_4bit_quant_type: nf4
@@ -90,22 +89,13 @@ game_manager:
       epsilon: 0.2
       epsilon_high: 0.28
       num_generations: ${training.num_generations}
-      per_device_train_batch_size: 2    # Small but safe
-      gradient_accumulation_steps: 4    # 🎯 BALANCED: Less accumulation
-      dataloader_num_workers: 1         # 🎯 BALANCED: 1 worker OK
-      fp16: true                        # Mixed precision
-      remove_unused_columns: true       # Remove unused data
-      dataloader_pin_memory: false      # Không pin memory
-      save_strategy: "steps"            # 🎯 BALANCED: Save checkpoints
-      save_steps: 100                   # Save every 100 steps
-      save_total_limit: 3               # Keep 3 recent checkpoints
     log_with: wandb
     log_dir: ${log_dir}
     judge_base_url: ${eval.judge_base_url}
   data_manager:
     _target_: rgym_exp.src.data.ReasoningGymDataManager
     yaml_config_path: "rgym_exp/src/datasets.yaml"
-    num_train_samples: 2
+    num_train_samples: 3
     num_evaluation_samples: 0
     num_generations: ${training.num_generations}
     system_prompt_id: 'default'
@@ -115,10 +105,9 @@ game_manager:
     timeout_per_sample: 300
     batch_timeout: 600
     enable_data_caching: false
-    cache_size: 0
-    infinite_data_loader: true        # Endless data cycling
-    data_recycling: true              # Reuse data when exhausted
-    shuffle_on_restart: true          # Shuffle when restarting data
+    infinite_data_loader: true
+    data_recycling: true
+    shuffle_on_restart: true
   communication:
     _target_: genrl.communication.hivemind.hivemind_backend.HivemindBackend
     initial_peers: ${communications.initial_peers}
