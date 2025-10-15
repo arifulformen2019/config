@@ -235,6 +235,7 @@ class VRAMMonitor:
 class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
     """
     Enhanced GRPO Trainer with LoRA, robust communication, and VRAM optimization.
+    FIXED: Không load lại model - chỉ thêm LoRA adapter vào model đã có sẵn.
     """
 
     def __init__(self, models: List[Any], **kwargs):
@@ -242,13 +243,12 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         Initialize the GRPO trainer module with LoRA and robust communication.
         
         Args:
-            models: List of models (can be empty for auto-initialization)
+            models: List of models ĐÃ ĐƯỢC TRUYỀN VÀO SẴN (không tạo mới)
             **kwargs: Configuration parameters including:
                 - lora_config: Dict or str preset ('ultra_low', 'low', 'balanced', 'high')
                 - enable_lora: bool (default True)
                 - vram_threshold_gb: float (default 3.5)
                 - gradient_checkpointing: bool (default True)
-                - model_id: str (default "Qwen/Qwen2.5-3B-Instruct")
         """
         # Initialize robust communication first
         self._init_robust_communication(kwargs)
@@ -262,17 +262,44 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         vram_threshold = kwargs.get("vram_threshold_gb", 3.5)
         self.vram_monitor = VRAMMonitor(threshold_gb=vram_threshold)
         
-        # Model initialization
-        if models:
-            for i, model in enumerate(models):
-                models[i] = self._setup_model_with_lora(model, kwargs)
-        else:
-            model = self._create_quantized_model(kwargs)
-            models = [model]
+        # Log VRAM trước khi xử lý model
+        get_logger().info("=" * 60)
+        get_logger().info("INITIALIZING GRPO TRAINER WITH LORA")
+        get_logger().info("=" * 60)
+        self.vram_monitor.log_usage(force=True)
         
-        super().__init__(models, **kwargs)
+        # === FIX CHÍNH: Chỉ thêm LoRA, KHÔNG LOAD LẠI MODEL ===
+        if not models or len(models) == 0:
+            raise ValueError("Models list is empty! Please provide pre-loaded models.")
         
-        # Judge client
+        get_logger().info(f"Received {len(models)} pre-loaded model(s)")
+        
+        # Xử lý từng model - CHỈ THÊM LoRA nếu cần
+        processed_models = []
+        for idx, model in enumerate(models):
+            get_logger().info(f"Processing model {idx + 1}/{len(models)}...")
+            
+            # Kiểm tra model đã có LoRA chưa
+            if self._has_lora(model):
+                get_logger().info(f"  → Model {idx + 1} already has LoRA, using as-is")
+                processed_models.append(model)
+            elif self.enable_lora:
+                get_logger().info(f"  → Adding LoRA to model {idx + 1}...")
+                lora_model = self._apply_lora_to_model(model)
+                processed_models.append(lora_model)
+                get_logger().info(f"  → LoRA added successfully")
+            else:
+                get_logger().info(f"  → LoRA disabled, using model {idx + 1} as-is")
+                processed_models.append(model)
+            
+            # Log VRAM sau mỗi model
+            self.vram_monitor.log_usage(force=True)
+        
+        # Gọi parent class init với models đã xử lý
+        # KHÔNG truyền kwargs để tránh re-initialize model
+        super().__init__(processed_models, **kwargs)
+        
+        # Judge client initialization
         judge_base_url = kwargs.get("judge_base_url", None)
         self.judge_client = JudgeClient(judge_base_url) if judge_base_url else None
         
@@ -282,7 +309,7 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         self._last_successful_gather = 0
         self._step_counter = 0
         
-        # Log initial setup
+        # Log final setup info
         self._log_setup_info()
 
     def _get_lora_config(self, config_input):
@@ -294,86 +321,75 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         else:
             return LoRAConfig.BALANCED
 
-    def _create_quantized_model(self, kwargs):
-        """Create a quantized model with LoRA"""
-        model_id = kwargs.get("model_id", "Qwen/Qwen2.5-3B-Instruct")
+    def _has_lora(self, model) -> bool:
+        """Check if model already has LoRA adapter"""
+        # Check if it's a PeftModel
+        if isinstance(model, PeftModel):
+            get_logger().info("    Model is PeftModel (has LoRA)")
+            return True
         
-        get_logger().info(f"Creating quantized model: {model_id}")
+        # Check for peft_config attribute
+        if hasattr(model, 'peft_config') and model.peft_config is not None:
+            get_logger().info("    Model has peft_config (has LoRA)")
+            return True
         
-        # BitsAndBytes config for 4-bit quantization
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
+        # Check for 'lora' in model structure
+        model_str = str(type(model)).lower()
+        if 'peft' in model_str or 'lora' in model_str:
+            get_logger().info("    Model type suggests LoRA is present")
+            return True
         
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
-        # Load base model
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            quantization_config=bnb_config,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True
-        )
-        
-        # Apply LoRA if enabled
-        if self.enable_lora:
-            model = self._apply_lora_to_model(model)
-        
-        return model
+        get_logger().info("    Model does NOT have LoRA")
+        return False
 
     def _apply_lora_to_model(self, model):
-        """Apply LoRA to a model"""
+        """
+        Apply LoRA to a model - KHÔNG RELOAD MODEL
+        Chỉ thêm LoRA adapter vào model hiện tại
+        """
+        # Double check - tránh thêm LoRA 2 lần
+        if self._has_lora(model):
+            get_logger().warning("Model already has LoRA - skipping")
+            return model
+        
         get_logger().info("Applying LoRA configuration...")
+        get_logger().info(f"  LoRA rank (r): {self.lora_config_dict['r']}")
+        get_logger().info(f"  LoRA alpha: {self.lora_config_dict['lora_alpha']}")
+        get_logger().info(f"  Target modules: {self.lora_config_dict['target_modules']}")
         
-        # Prepare model for k-bit training
-        model = prepare_model_for_kbit_training(model)
-        
-        # Create LoRA config
-        lora_config = LoraConfig(**self.lora_config_dict)
-        
-        # Apply LoRA
-        model = get_peft_model(model, lora_config)
-        self.lora_model = model
-        
-        # Log trainable parameters
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_pct = 100 * trainable_params / total_params
-        
-        get_logger().info(f"LoRA applied - Trainable: {trainable_params:,} ({trainable_pct:.2f}%)")
-        get_logger().info(f"LoRA config: r={self.lora_config_dict['r']}, "
-                         f"alpha={self.lora_config_dict['lora_alpha']}, "
-                         f"modules={self.lora_config_dict['target_modules']}")
-        
-        return model
-
-    def _setup_model_with_lora(self, model, kwargs):
-        """Setup model with LoRA, assumes model is already quantized"""
-        if not self._is_model_quantized(model):
-            get_logger().error("Model is not quantized! This may cause VRAM issues. Avoid using non-quantized models.")
-            raise ValueError("Model must be 4-bit quantized. Use _create_quantized_model instead.")
-        
-        if self.enable_lora and not self._has_lora(model):
-            model = self._apply_lora_to_model(model)
-        
-        return model
-
-
-    def _has_lora(self, model):
-        """Check if model already has LoRA"""
-        return isinstance(model, PeftModel)
+        try:
+            # Prepare model for k-bit training
+            get_logger().info("  Preparing model for k-bit training...")
+            model = prepare_model_for_kbit_training(model)
+            
+            # Create LoRA config
+            lora_config = LoraConfig(**self.lora_config_dict)
+            
+            # Apply LoRA - chỉ thêm adapter, không thay đổi base model
+            get_logger().info("  Applying LoRA adapter...")
+            model = get_peft_model(model, lora_config)
+            self.lora_model = model
+            
+            # Log trainable parameters
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_pct = 100 * trainable_params / total_params
+            
+            get_logger().info(f"  ✓ LoRA applied successfully")
+            get_logger().info(f"  Trainable params: {trainable_params:,} ({trainable_pct:.2f}%)")
+            get_logger().info(f"  Total params: {total_params:,}")
+            
+            return model
+            
+        except Exception as e:
+            get_logger().error(f"Failed to apply LoRA: {e}")
+            get_logger().warning("Returning original model without LoRA")
+            return model
 
     def _log_setup_info(self):
         """Log setup information"""
         get_logger().info("=" * 60)
-        get_logger().info("GRPO Trainer with LoRA - Setup Complete")
+        get_logger().info("GRPO TRAINER SETUP COMPLETE")
         get_logger().info("=" * 60)
         get_logger().info(f"LoRA Enabled: {self.enable_lora}")
         if self.enable_lora:
@@ -649,44 +665,16 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             self._robust_backend = create_robust_communication_wrapper(backend)
             get_logger().info("Communication backend updated")
 
-    def _is_model_quantized(self, model) -> bool:
-        """Check if model is quantized"""
-        if hasattr(model, 'is_quantized') and model.is_quantized:
-            return True
-        if hasattr(model, 'is_loaded_in_4bit') and model.is_loaded_in_4bit:
-            return True
-        
-        if (hasattr(model, 'config') and 
-            hasattr(model.config, 'quantization_config') and 
-            model.config.quantization_config is not None):
-            qconfig = model.config.quantization_config
-            if hasattr(qconfig, 'load_in_4bit') and qconfig.load_in_4bit:
-                return True
-        
-        int_params = sum(p.numel() for p in model.parameters() if 'int' in str(p.dtype).lower())
-        total_params = sum(p.numel() for p in model.parameters())
-        
-        return total_params > 0 and int_params / total_params > 0.1
-
-    def _reload_with_quantization(self, model, kwargs):
-        """Reload model with quantization"""
-        model_name = getattr(model, 'name_or_path', kwargs.get("model_id", "Qwen/Qwen2.5-3B-Instruct"))
-        
-        if hasattr(model, 'cpu'):
-            model.cpu()
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        return self._create_quantized_model({'model_id': model_name, **kwargs})
-
     def _initialize_model(self, enable_gradient_checkpointing: bool = True):
-        """Override to handle quantized LoRA models"""
-        is_quantized = self._is_model_quantized(self.model)
-        
-        if not is_quantized:
+        """Override to handle LoRA models properly - KHÔNG DI CHUYỂN MODEL"""
+        # LoRA models đã ở đúng device, không cần di chuyển
+        if self._has_lora(self.model):
+            get_logger().info("LoRA model detected - skipping device placement")
+        else:
+            # Chỉ di chuyển nếu không phải LoRA model
             self.model = self.model.to(device=self.device, dtype=self.dtype)
         
+        # Enable gradient checkpointing nếu cần
         if enable_gradient_checkpointing and hasattr(self.model, 'gradient_checkpointing_enable'):
             self.model.gradient_checkpointing_enable()
             get_logger().info("Gradient checkpointing enabled")
