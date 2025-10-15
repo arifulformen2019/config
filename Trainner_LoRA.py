@@ -312,7 +312,6 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        self.tokenizer = tokenizer
         
         # Load base model
         model = AutoModelForCausalLM.from_pretrained(
@@ -356,18 +355,16 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         return model
 
     def _setup_model_with_lora(self, model, kwargs):
-        """Setup existing model with quantization check and LoRA"""
-        is_quantized = self._is_model_quantized(model)
-        
-        if not is_quantized:
-            get_logger().warning("Model is not quantized, reloading...")
-            model = self._reload_with_quantization(model, kwargs)
+        """Setup model with LoRA, assumes model is already quantized"""
+        if not self._is_model_quantized(model):
+            get_logger().error("Model is not quantized! This may cause VRAM issues. Avoid using non-quantized models.")
+            raise ValueError("Model must be 4-bit quantized. Use _create_quantized_model instead.")
         
         if self.enable_lora and not self._has_lora(model):
-            get_logger().info("Adding LoRA to existing model...")
             model = self._apply_lora_to_model(model)
         
         return model
+
 
     def _has_lora(self, model):
         """Check if model already has LoRA"""
