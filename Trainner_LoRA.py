@@ -192,12 +192,15 @@ class LoRAConfig:
 
 
 class VRAMMonitor:
-    """Monitor and log VRAM usage"""
+    """Enhanced VRAM monitor with aggressive cleanup"""
     
-    def __init__(self, threshold_gb=0.5):
+    def __init__(self, threshold_gb=0.5, max_vram_gb=20.0):
         self.threshold_gb = threshold_gb
+        self.max_vram_gb = max_vram_gb
         self.last_log_time = 0
-        self.log_interval = 60  # Log every 60 seconds
+        self.log_interval = 30  # Log every 30 seconds
+        self.peak_vram = 0.0
+        self.cleanup_counter = 0
         
     def get_vram_usage(self):
         """Get current VRAM usage in GB"""
@@ -206,6 +209,11 @@ class VRAMMonitor:
         
         allocated = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
+        
+        # Track peak
+        if allocated > self.peak_vram:
+            self.peak_vram = allocated
+        
         return allocated, reserved
     
     def should_clear_cache(self):
@@ -213,29 +221,71 @@ class VRAMMonitor:
         allocated, _ = self.get_vram_usage()
         return allocated > self.threshold_gb
     
-    def log_usage(self, force=False):
+    def is_vram_critical(self):
+        """Check if VRAM is critically high"""
+        allocated, _ = self.get_vram_usage()
+        return allocated > (self.max_vram_gb * 0.85)  # 85% of max
+    
+    def log_usage(self, force=False, context=""):
         """Log VRAM usage periodically"""
         current_time = time.time()
         if not force and (current_time - self.last_log_time) < self.log_interval:
             return
         
         allocated, reserved = self.get_vram_usage()
-        get_logger().info(f"VRAM: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+        prefix = f"[{context}] " if context else ""
+        get_logger().info(
+            f"{prefix}VRAM: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, "
+            f"Peak: {self.peak_vram:.2f}GB"
+        )
         self.last_log_time = current_time
     
-    def smart_clear(self):
-        """Smart cache clearing"""
-        if self.should_clear_cache():
-            torch.cuda.empty_cache()
+    def smart_clear(self, aggressive=False):
+        """Smart cache clearing with levels"""
+        if self.should_clear_cache() or aggressive:
+            self.cleanup_counter += 1
+            
+            if aggressive or self.is_vram_critical():
+                # Aggressive cleanup
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # Force garbage collection multiple times
+                for _ in range(3):
+                    gc.collect()
+                
+                allocated, _ = self.get_vram_usage()
+                get_logger().warning(
+                    f"AGGRESSIVE cache clear #{self.cleanup_counter} - VRAM: {allocated:.2f}GB"
+                )
+            else:
+                # Normal cleanup
+                torch.cuda.empty_cache()
+                gc.collect()
+                allocated, _ = self.get_vram_usage()
+                if self.cleanup_counter % 10 == 0:
+                    get_logger().info(f"Cache cleared #{self.cleanup_counter} - VRAM: {allocated:.2f}GB")
+    
+    def force_cleanup(self):
+        """Force aggressive cleanup"""
+        get_logger().warning("FORCING AGGRESSIVE VRAM CLEANUP...")
+        
+        # Multiple rounds of cleanup
+        for i in range(5):
             gc.collect()
-            allocated, _ = self.get_vram_usage()
-            get_logger().info(f"Cache cleared - VRAM: {allocated:.2f}GB")
+            torch.cuda.empty_cache()
+            if i < 4:
+                time.sleep(0.1)  # Brief pause between cleanups
+        
+        torch.cuda.synchronize()
+        allocated, reserved = self.get_vram_usage()
+        get_logger().warning(f"After forced cleanup: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
 
 
 class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
     """
-    Enhanced GRPO Trainer with LoRA, robust communication, and VRAM optimization.
-    FIXED: Không load lại model - chỉ thêm LoRA adapter vào model đã có sẵn.
+    Enhanced GRPO Trainer with LoRA, robust communication, and AGGRESSIVE VRAM optimization.
     """
 
     def __init__(self, models: List[Any], **kwargs):
@@ -243,12 +293,14 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         Initialize the GRPO trainer module with LoRA and robust communication.
         
         Args:
-            models: List of models ĐÃ ĐƯỢC TRUYỀN VÀO SẴN (không tạo mới)
+            models: List of models ĐÃ ĐƯỢC TRUYỀN VÀO SẴN
             **kwargs: Configuration parameters including:
                 - lora_config: Dict or str preset ('ultra_low', 'low', 'balanced', 'high')
                 - enable_lora: bool (default True)
-                - vram_threshold_gb: float (default 3.5)
+                - vram_threshold_gb: float (default 2.0) - Giảm xuống để cleanup sớm hơn
+                - max_vram_gb: float (default 20.0) - Giới hạn VRAM tối đa
                 - gradient_checkpointing: bool (default True)
+                - accumulation_steps: int (default 4) - Gradient accumulation
         """
         # Initialize robust communication first
         self._init_robust_communication(kwargs)
@@ -258,46 +310,55 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         self.lora_config_dict = self._get_lora_config(kwargs.get("lora_config", "balanced"))
         self.lora_model = None
         
-        # VRAM monitoring
-        vram_threshold = kwargs.get("vram_threshold_gb", 3.5)
-        self.vram_monitor = VRAMMonitor(threshold_gb=vram_threshold)
+        # VRAM monitoring - AGGRESSIVE SETTINGS
+        vram_threshold = kwargs.get("vram_threshold_gb", 2.0)  # Giảm xuống để cleanup sớm
+        max_vram = kwargs.get("max_vram_gb", 20.0)
+        self.vram_monitor = VRAMMonitor(threshold_gb=vram_threshold, max_vram_gb=max_vram)
+        
+        # Gradient accumulation for lower memory
+        self.accumulation_steps = kwargs.get("accumulation_steps", 4)
+        self._accumulation_counter = 0
         
         # Log VRAM trước khi xử lý model
         get_logger().info("=" * 60)
-        get_logger().info("INITIALIZING GRPO TRAINER WITH LORA")
+        get_logger().info("INITIALIZING GRPO TRAINER WITH AGGRESSIVE VRAM OPTIMIZATION")
         get_logger().info("=" * 60)
-        self.vram_monitor.log_usage(force=True)
+        self.vram_monitor.log_usage(force=True, context="INIT START")
         
-        # === FIX CHÍNH: Chỉ thêm LoRA, KHÔNG LOAD LẠI MODEL ===
+        # === Process models - CHỈ THÊM LoRA ===
         if not models or len(models) == 0:
             raise ValueError("Models list is empty! Please provide pre-loaded models.")
         
         get_logger().info(f"Received {len(models)} pre-loaded model(s)")
         
-        # Xử lý từng model - CHỈ THÊM LoRA nếu cần
+        # Clear cache trước khi xử lý
+        self.vram_monitor.smart_clear(aggressive=True)
+        
         processed_models = []
         for idx, model in enumerate(models):
             get_logger().info(f"Processing model {idx + 1}/{len(models)}...")
             
-            # Kiểm tra model đã có LoRA chưa
             if self._has_lora(model):
-                get_logger().info(f"  → Model {idx + 1} already has LoRA, using as-is")
+                get_logger().info(f"  → Model {idx + 1} already has LoRA")
                 processed_models.append(model)
             elif self.enable_lora:
                 get_logger().info(f"  → Adding LoRA to model {idx + 1}...")
                 lora_model = self._apply_lora_to_model(model)
                 processed_models.append(lora_model)
-                get_logger().info(f"  → LoRA added successfully")
+                # Clear sau khi thêm LoRA
+                self.vram_monitor.smart_clear(aggressive=True)
             else:
-                get_logger().info(f"  → LoRA disabled, using model {idx + 1} as-is")
+                get_logger().info(f"  → Using model {idx + 1} as-is (LoRA disabled)")
                 processed_models.append(model)
             
-            # Log VRAM sau mỗi model
-            self.vram_monitor.log_usage(force=True)
+            self.vram_monitor.log_usage(force=True, context=f"MODEL {idx+1}")
         
-        # Gọi parent class init với models đã xử lý
-        # KHÔNG truyền kwargs để tránh re-initialize model
+        # Gọi parent class init
         super().__init__(processed_models, **kwargs)
+        
+        # Enable gradient checkpointing - CRITICAL for VRAM
+        if kwargs.get("gradient_checkpointing", True):
+            self._enable_gradient_checkpointing()
         
         # Judge client initialization
         judge_base_url = kwargs.get("judge_base_url", None)
@@ -309,8 +370,26 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         self._last_successful_gather = 0
         self._step_counter = 0
         
-        # Log final setup info
+        # Training state tracking
+        self._last_cleanup_step = 0
+        self._emergency_cleanup_triggered = False
+        
+        # Final aggressive cleanup
+        self.vram_monitor.force_cleanup()
+        
+        # Log final setup
         self._log_setup_info()
+
+    def _enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing to save VRAM"""
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            try:
+                self.model.gradient_checkpointing_enable()
+                get_logger().info("✓ Gradient checkpointing ENABLED (saves ~30-50% VRAM)")
+            except Exception as e:
+                get_logger().warning(f"Could not enable gradient checkpointing: {e}")
+        else:
+            get_logger().warning("Model does not support gradient checkpointing")
 
     def _get_lora_config(self, config_input):
         """Get LoRA configuration from input"""
@@ -323,31 +402,17 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
 
     def _has_lora(self, model) -> bool:
         """Check if model already has LoRA adapter"""
-        # Check if it's a PeftModel
         if isinstance(model, PeftModel):
-            get_logger().info("    Model is PeftModel (has LoRA)")
             return True
-        
-        # Check for peft_config attribute
         if hasattr(model, 'peft_config') and model.peft_config is not None:
-            get_logger().info("    Model has peft_config (has LoRA)")
             return True
-        
-        # Check for 'lora' in model structure
         model_str = str(type(model)).lower()
         if 'peft' in model_str or 'lora' in model_str:
-            get_logger().info("    Model type suggests LoRA is present")
             return True
-        
-        get_logger().info("    Model does NOT have LoRA")
         return False
 
     def _apply_lora_to_model(self, model):
-        """
-        Apply LoRA to a model - KHÔNG RELOAD MODEL
-        Chỉ thêm LoRA adapter vào model hiện tại
-        """
-        # Double check - tránh thêm LoRA 2 lần
+        """Apply LoRA to a model - KHÔNG RELOAD MODEL"""
         if self._has_lora(model):
             get_logger().warning("Model already has LoRA - skipping")
             return model
@@ -365,7 +430,7 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             # Create LoRA config
             lora_config = LoraConfig(**self.lora_config_dict)
             
-            # Apply LoRA - chỉ thêm adapter, không thay đổi base model
+            # Apply LoRA
             get_logger().info("  Applying LoRA adapter...")
             model = get_peft_model(model, lora_config)
             self.lora_model = model
@@ -376,14 +441,13 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             trainable_pct = 100 * trainable_params / total_params
             
             get_logger().info(f"  ✓ LoRA applied successfully")
-            get_logger().info(f"  Trainable params: {trainable_params:,} ({trainable_pct:.2f}%)")
-            get_logger().info(f"  Total params: {total_params:,}")
+            get_logger().info(f"  Trainable: {trainable_params:,} ({trainable_pct:.2f}%)")
+            get_logger().info(f"  Total: {total_params:,}")
             
             return model
             
         except Exception as e:
             get_logger().error(f"Failed to apply LoRA: {e}")
-            get_logger().warning("Returning original model without LoRA")
             return model
 
     def _log_setup_info(self):
@@ -395,9 +459,10 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         if self.enable_lora:
             get_logger().info(f"LoRA Rank: {self.lora_config_dict['r']}")
             get_logger().info(f"LoRA Alpha: {self.lora_config_dict['lora_alpha']}")
-            get_logger().info(f"Target Modules: {self.lora_config_dict['target_modules']}")
+        get_logger().info(f"Gradient Accumulation Steps: {self.accumulation_steps}")
         get_logger().info(f"VRAM Threshold: {self.vram_monitor.threshold_gb:.2f}GB")
-        self.vram_monitor.log_usage(force=True)
+        get_logger().info(f"Max VRAM: {self.vram_monitor.max_vram_gb:.2f}GB")
+        self.vram_monitor.log_usage(force=True, context="SETUP COMPLETE")
         get_logger().info("=" * 60)
 
     def _init_robust_communication(self, kwargs):
@@ -504,30 +569,68 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         get_logger().info(f"  Emergency: {self._emergency_mode_enabled}")
         
         # Also log VRAM
-        self.vram_monitor.log_usage()
+        self.vram_monitor.log_usage(context=f"STEP {step_num}")
 
     def train_step_with_communication(self, batch_data, step_num, loss_fn=None, optimizer=None):
-        """Enhanced training step with built-in communication and VRAM management"""
+        """
+        Enhanced training step with AGGRESSIVE VRAM management and gradient accumulation
+        """
         
         try:
-            # VRAM check before forward pass
-            self.vram_monitor.smart_clear()
+            # === VRAM CHECK - CRITICAL ===
+            if self.vram_monitor.is_vram_critical():
+                get_logger().warning(f"Step {step_num}: VRAM CRITICAL - forcing cleanup")
+                self.vram_monitor.force_cleanup()
+                self._emergency_cleanup_triggered = True
+            elif (step_num - self._last_cleanup_step) >= 5:
+                # Cleanup mỗi 5 steps
+                self.vram_monitor.smart_clear(aggressive=False)
+                self._last_cleanup_step = step_num
             
-            # Forward pass
-            with torch.cuda.amp.autocast():
+            # === FORWARD PASS ===
+            # Sử dụng autocast để giảm memory
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 outputs = self.forward(batch_data)
                 loss = outputs.get('loss', None)
                 
                 if loss is None and loss_fn is not None:
                     loss = loss_fn(outputs, batch_data)
+                
+                # Scale loss for gradient accumulation
+                if self.accumulation_steps > 1:
+                    loss = loss / self.accumulation_steps
             
-            # Prepare data for gathering
+            # === BACKWARD PASS với gradient accumulation ===
+            if loss is not None:
+                loss.backward()
+                
+                self._accumulation_counter += 1
+                
+                # Chỉ update weights sau N accumulation steps
+                if self._accumulation_counter >= self.accumulation_steps:
+                    # Gradient clipping
+                    if hasattr(self, 'model'):
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    # Optimizer step
+                    if optimizer is not None:
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)  # set_to_none=True saves memory
+                    
+                    # Reset counter
+                    self._accumulation_counter = 0
+                    
+                    # Clear cache after optimizer step
+                    self.vram_monitor.smart_clear(aggressive=False)
+            
+            # === COMMUNICATION ===
             step_data = {
                 'step': step_num,
-                'loss': loss.item() if loss is not None else 0.0,
+                'loss': loss.item() * self.accumulation_steps if loss is not None else 0.0,  # Un-scale loss
                 'agent_id': self._robust_backend.get_id(),
                 'batch_size': len(batch_data) if hasattr(batch_data, '__len__') else 1,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'vram_gb': self.vram_monitor.get_vram_usage()[0]
             }
             
             if 'logits' in outputs:
@@ -541,29 +644,37 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             # Process results
             processed_outputs = self._process_distributed_results(gathered_results, outputs, step_num)
             
-            # Backward pass
-            if loss is not None:
-                loss.backward()
-                
-                # Gradient clipping
-                if hasattr(self, 'model'):
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                # Optimizer step
-                if optimizer is not None:
-                    optimizer.step()
-                    optimizer.zero_grad()
-            
-            # VRAM management
+            # === AGGRESSIVE CLEANUP SCHEDULE ===
             if step_num % 10 == 0:
-                self.vram_monitor.smart_clear()
+                self.vram_monitor.smart_clear(aggressive=False)
             
-            # Log VRAM periodically
-            if step_num % 100 == 0:
-                self.vram_monitor.log_usage()
+            if step_num % 50 == 0:
+                self.vram_monitor.smart_clear(aggressive=True)
+                self.vram_monitor.log_usage(force=True, context=f"STEP {step_num}")
+            
+            # Emergency cleanup nếu cần
+            if self._emergency_cleanup_triggered and step_num % 100 == 0:
+                get_logger().warning(f"Step {step_num}: Running emergency VRAM check")
+                self.vram_monitor.force_cleanup()
+                self._emergency_cleanup_triggered = False
             
             return processed_outputs
             
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                get_logger().error(f"Step {step_num}: OUT OF MEMORY - Emergency cleanup")
+                self.vram_monitor.force_cleanup()
+                
+                # Try to recover
+                if optimizer is not None:
+                    optimizer.zero_grad(set_to_none=True)
+                
+                torch.cuda.empty_cache()
+                
+                raise e
+            else:
+                raise e
+                
         except Exception as e:
             get_logger().error(f"Training step {step_num} failed: {e}")
             return {
@@ -590,6 +701,7 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             
             losses = []
             batch_sizes = []
+            vram_usage = []
             
             for agent_id, data in gathered_results.items():
                 if isinstance(data, dict):
@@ -597,6 +709,8 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
                         losses.append(data['loss'])
                     if 'batch_size' in data:
                         batch_sizes.append(data['batch_size'])
+                    if 'vram_gb' in data:
+                        vram_usage.append(data['vram_gb'])
             
             if losses:
                 processed['distributed_avg_loss'] = sum(losses) / len(losses)
@@ -605,9 +719,17 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             if batch_sizes:
                 processed['total_batch_size'] = sum(batch_sizes)
             
+            if vram_usage:
+                processed['avg_vram_gb'] = sum(vram_usage) / len(vram_usage)
+                processed['max_vram_gb'] = max(vram_usage)
+            
             if step_num % 100 == 0:
                 avg_loss = processed.get('distributed_avg_loss', 0.0)
-                get_logger().info(f"Step {step_num}: Distributed - {len(gathered_results)} agents, loss={avg_loss:.4f}")
+                avg_vram = processed.get('avg_vram_gb', 0.0)
+                get_logger().info(
+                    f"Step {step_num}: {len(gathered_results)} agents, "
+                    f"loss={avg_loss:.4f}, VRAM={avg_vram:.2f}GB"
+                )
         
         return processed
 
@@ -666,24 +788,23 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             get_logger().info("Communication backend updated")
 
     def _initialize_model(self, enable_gradient_checkpointing: bool = True):
-        """Override to handle LoRA models properly - KHÔNG DI CHUYỂN MODEL"""
-        # LoRA models đã ở đúng device, không cần di chuyển
+        """Override to handle LoRA models properly"""
         if self._has_lora(self.model):
             get_logger().info("LoRA model detected - skipping device placement")
         else:
-            # Chỉ di chuyển nếu không phải LoRA model
             self.model = self.model.to(device=self.device, dtype=self.dtype)
         
-        # Enable gradient checkpointing nếu cần
-        if enable_gradient_checkpointing and hasattr(self.model, 'gradient_checkpointing_enable'):
-            self.model.gradient_checkpointing_enable()
-            get_logger().info("Gradient checkpointing enabled")
+        if enable_gradient_checkpointing:
+            self._enable_gradient_checkpointing()
 
     @torch.no_grad()
     def evaluate(self, state: GameState, data_manager: DataManager, reward_manager: RewardManager):
         """Evaluate with VRAM management"""
         if not self.judge_client:
             return
+        
+        # Clear cache trước eval
+        self.vram_monitor.smart_clear(aggressive=True)
             
         try:
             model_name = self.model.name_or_path
@@ -711,11 +832,17 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         )
 
         input_ids = input_ids.to(self.model.device)
-        outputs = self.model.generate(input_ids, max_new_tokens=512)
+        
+        # Generate with autocast
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            outputs = self.model.generate(input_ids, max_new_tokens=512)
+        
         answer = self.processing_class.decode(outputs[0], skip_special_tokens=True)
         
-        # Clear cache after generation
-        self.vram_monitor.smart_clear()
+        # Clear cache sau generation
+        del outputs
+        del input_ids
+        self.vram_monitor.smart_clear(aggressive=True)
         
         self.judge_client.submit_answer(
             session_id=result["session_id"],
@@ -728,6 +855,9 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         """Play PRG game with VRAM management"""
         if not self.judge_client:
             return {'status': PRGGameStatus.ERROR}
+
+        # Clear cache trước inference
+        self.vram_monitor.smart_clear(aggressive=True)
 
         game_clue_dict = self.judge_client.get_current_clue()
         
@@ -766,8 +896,10 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             choice_logits = self._get_choice_logits(input_ids, choices)
             choice_idx = torch.argmax(choice_logits).item()
             
-            # Clear cache after inference
-            self.vram_monitor.smart_clear()
+            # Clear cache sau inference
+            del input_ids
+            del choice_logits
+            self.vram_monitor.smart_clear(aggressive=True)
             
             return {
                 "game_idx": game_id,
@@ -783,7 +915,7 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             return {'status': PRGGameStatus.ERROR}
 
     def _get_choice_logits(self, input_ids: torch.Tensor, choices: List[str]) -> torch.Tensor:
-        """Get choice logits with VRAM management"""
+        """Get choice logits with AGGRESSIVE VRAM management"""
         device = input_ids.device
         batch_size, prompt_len = input_ids.shape
         logits_list = []
@@ -799,19 +931,25 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             seq = torch.cat([input_ids, choice_ids], dim=1)
             labels = seq.clone()
             labels[:, :prompt_len] = -100
-            outputs = self.model(input_ids=seq, labels=labels)
-
+            
+            # Use autocast
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                outputs = self.model(input_ids=seq, labels=labels)
+            
             total_log_prob = -outputs.loss * choice_ids.size(1)
             logits_list.append(total_log_prob)
             
-            # Clear cache between choices if needed
-            if i > 0 and i % 5 == 0:
-                self.vram_monitor.smart_clear()
+            # Clear intermediates
+            del choice_ids, seq, labels, outputs
+            
+            # Aggressive cleanup between choices
+            if i > 0 and i % 2 == 0:  # Every 2 choices
+                self.vram_monitor.smart_clear(aggressive=True)
 
         return torch.stack(logits_list)
 
     def cleanup(self):
-        """Clean shutdown with VRAM cleanup"""
+        """Clean shutdown with AGGRESSIVE VRAM cleanup"""
         get_logger().info("Starting cleanup...")
         
         # Communication cleanup
@@ -825,10 +963,9 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
             except Exception as e:
                 get_logger().warning(f"Communication cleanup error: {e}")
         
-        # VRAM cleanup
+        # Aggressive VRAM cleanup
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
+            self.vram_monitor.force_cleanup()
         
         get_logger().info("Cleanup completed")
 
