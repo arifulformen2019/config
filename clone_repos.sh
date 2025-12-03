@@ -8,13 +8,13 @@ OTEL_HTTP_PORT=4318
 OTEL_PROM_PORT=55679
 
 # Repository URL
-REPO_URL="https://github.com/arifulformen2019/rl-swarm.git"
+REPO_URL="https://github.com/heisenberg3301/rl-swarm.git"
 
 # Temporary directory to clone the original repository
 TEMP_DIR="rl-swarm-temp"
 
 # Number of directories to create (can be changed, e.g.: 5 or 10)
-NUM_INSTANCES=30
+NUM_INSTANCES=70
 
 # Port increment step for each instance
 INCREMENT_STEP=10
@@ -77,7 +77,7 @@ for ((i=0; i<=NUM_INSTANCES; i++)); do
     RUN_SCRIPT="$INSTANCE/run_rl_swarm.sh"
     PACKAGE_JSON="$INSTANCE/modal-login/package.json"
     ENV_FILE="$INSTANCE/.env"
-    CONFIG_YAML="$INSTANCE/rgym_exp/config/rg-swarm.yaml"
+    CONFIG_YAML="$INSTANCE/code_gen_exp/config/code-gen-swarm.yaml"
     COORDINATOR_PY="$INSTANCE/.venv/lib/python3.12/site-packages/genrl/blockchain/coordinator.py"
 
     # Update docker-compose.yaml
@@ -130,13 +130,6 @@ for ((i=0; i<=NUM_INSTANCES; i++)); do
         echo "Warning: $CONFIG_YAML not found"
     fi
 
-    # Update coordinator.py (if needed)
-    # if [ -f "$COORDINATOR_PY" ]; then
-    #     echo "Checking and updating ports in $COORDINATOR_PY..."
-    #     sed -i "s/http:\/\/localhost:$BASE_PORT/http:\/\/localhost:$NEW_BASE_PORT/g" "$COORDINATOR_PY"
-    # else
-    #     echo "Warning: $COORDINATOR_PY not found"
-    # fi
 
     echo "New ports for $INSTANCE:"
     echo "BASE_PORT: $NEW_BASE_PORT"
@@ -146,22 +139,11 @@ for ((i=0; i<=NUM_INSTANCES; i++)); do
     echo "OTEL_PROM_PORT: $NEW_OTEL_PROM_PORT"
 done
 
-# Step 4: Check API status
-# for ((i=1; i<=NUM_INSTANCES; i++)); do
-#     INSTANCE="rl-swarm-$i"
-#     NEW_BASE_PORT=$((BASE_PORT + (i-1) * INCREMENT_STEP))
-#     echo "Checking API for $INSTANCE on port $NEW_BASE_PORT..."
-#     if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$NEW_BASE_PORT/api/submit-reward"; then
-#         echo "API /submit-reward on port $NEW_BASE_PORT is ready."
-#     else
-#         echo "Warning: API /submit-reward on port $NEW_BASE_PORT is not responding. Please run 'yarn start' in $INSTANCE/modal-login first."
-#     fi
-# done
 
 echo "Complete! $NUM_INSTANCES directories have been created and ports have been updated."
 echo "To run each instance:"
 echo "1. Go to the modal-login directory and run 'yarn start' or 'npm start'."
-echo "2. Then, go to the root directory and run './run_rl_swarm.sh' or 'python rgym_exp/runner/swarm_launcher.py'."
+echo "2. Then, go to the root directory and run './run_rl_swarm.sh' or 'python code_gen_exp/runner/swarm_launcher.py'."
 echo "Example:"
 echo "  cd rl-swarm-1/modal-login && yarn start"
-echo "  cd ../.. && python rgym_exp/runner/swarm_launcher.py"
+echo "  cd ../.. && python code_gen_exp/runner/swarm_launcher.py"
